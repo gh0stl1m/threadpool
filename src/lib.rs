@@ -1,64 +1,104 @@
-use std::sync::mpsc::{channel, Sender};
-use std::sync::Mutex;
-use std::sync::Arc;
-use std::vec;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 
+type Job = Box<dyn FnOnce() + Send + 'static>;
 pub struct ThreadPool {
-    _handles: Vec<std::thread::JoinHandle<()>>,
-    sender: Sender<Box<dyn Fn() + Send>>
+    _workers: Vec<Worker>,
+    tx: mpsc::Sender<Job>,
 }
 
 impl ThreadPool {
 
-    pub fn new(num_threads: u8) -> Self {
-        let (sender, reciever) = channel::<Box<dyn Fn() + Send>>();
-        let reciever = Arc::new(Mutex::new(reciever));
-        let mut _handles = vec![];
+    pub fn new(worker_count: usize) -> Self {
 
-        for _ in 0..num_threads {
-            let clone = reciever.clone();
-            let handle = std::thread::spawn(move || {
-                loop {
-                    let work = clone.lock().unwrap().recv();
-                    match work {
-                       Ok(rx) => {
-                           println!("Got a job! executing");
-                           rx();
-                           println!("Job finished");
-                       }
-                       Err(_) => {
-                           println!("Worker signing off");
-                           break;
-                       }
-                    }
-                }
-            });
+        let (tx, rx) = mpsc::channel();
 
-            _handles.push(handle);
+        let rx = Arc::new(Mutex::new(rx));
 
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for n in 0..worker_count {
+            workers.push(Worker::new(n, Arc::clone(&rx)))
         }
-        Self{
-            _handles,
-            sender
+
+        ThreadPool {
+            _workers: workers,
+            tx,
         }
     }
 
     pub fn execute<T: Fn() + Send + 'static>(&self, work: T) {
 
-        self.sender.send(Box::new(work)).unwrap();
+        self.tx.send(Box::new(work))
+            .expect("Thread shut down too early");
+    }
+}
+
+pub struct Worker {
+    _id: usize,
+    _handle: thread::JoinHandle<()>
+}
+
+impl Worker {
+    fn new(id: usize, rx: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
+        let handle = thread::spawn(move || loop {
+            let result = rx.lock().unwrap().recv();
+            match result {
+                Ok(rx) => {
+                    println!("Worker {} got a job; executing.", id);
+                    rx()
+                }
+                Err(_) => {
+                    println!("Worker {} signing off", id);
+                    break;
+                }
+            }
+        });
+        Worker {
+            _id: id,
+            _handle: handle,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::ThreadPool;
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn it_works() {
-        let pool = ThreadPool::new(10);
-        let foo = || std::thread::sleep(std::time::Duration::from_secs(1));
-        pool.execute(foo.clone());
-        pool.execute(foo);
+    fn test_threadpool() {
+        let pool = ThreadPool::new(4);
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let count1 = count.clone();
+        pool.execute(move || {
+            println!("Thread 1");
+            count1.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        });
+        let count2 = count.clone();
+        pool.execute(move || {
+            println!("Thread 2");
+            count2.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        });
+        let count3 = count.clone();
+        pool.execute(move || {
+            println!("Thread 3");
+            count3.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        });
+        let count4 = count.clone();
+        pool.execute(move || {
+            println!("Thread 4");
+            count4.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        });
         std::thread::sleep(std::time::Duration::from_secs(2));
+
+        let count = count.load(Ordering::SeqCst);
+
+        assert_eq!(count, 4);
     }
 }
