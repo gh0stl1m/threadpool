@@ -1,11 +1,11 @@
-use core::num;
-use std::sync::mpsc::{channel};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
 use std::sync::Arc;
 use std::vec;
 
 pub struct ThreadPool {
-    _handles: Vec<std::thread::JoinHandle<()>>
+    _handles: Vec<std::thread::JoinHandle<()>>,
+    sender: Sender<Box<dyn Fn() + Send>>
 }
 
 impl ThreadPool {
@@ -19,8 +19,18 @@ impl ThreadPool {
             let clone = reciever.clone();
             let handle = std::thread::spawn(move || {
                 loop {
-                    let work = clone.lock().unwrap().recv().unwrap();
-                    work();
+                    let work = clone.lock().unwrap().recv();
+                    match work {
+                       Ok(rx) => {
+                           println!("Got a job! executing");
+                           rx();
+                           println!("Job finished");
+                       }
+                       Err(_) => {
+                           println!("Worker signing off");
+                           break;
+                       }
+                    }
                 }
             });
 
@@ -28,12 +38,15 @@ impl ThreadPool {
 
         }
         Self{
-            _handles
+            _handles,
+            sender
         }
     }
 
-    pub fn execute<T: Fn()>(&self, work: T) {}
-    
+    pub fn execute<T: Fn() + Send + 'static>(&self, work: T) {
+
+        self.sender.send(Box::new(work)).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -42,8 +55,10 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let pool = ThreadPool::new();
-        pool.execute(|| println!("Hello from thread 1"));
-        pool.execute(|| println!("Hello from thread 2"));
+        let pool = ThreadPool::new(10);
+        let foo = || std::thread::sleep(std::time::Duration::from_secs(1));
+        pool.execute(foo.clone());
+        pool.execute(foo);
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
 }
